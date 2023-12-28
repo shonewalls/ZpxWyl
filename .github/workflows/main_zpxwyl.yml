@@ -66,4 +66,4 @@ jobs:
         with:
           app-name: 'ZpxWyl'
           slot-name: 'Production'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_28A9D7ED49404F2C987F13059654ED8F }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_E60392C89FB84CD087CC3C1B63FE2DC8 }}
