@@ -1,220 +1,207 @@
-from flask import Flask, request, jsonify, render_template
-
-import random
-import redis
+import copy
+import re
 import time
-import json
-from azure.cosmos import CosmosClient 
-import numpy as np
-from sklearn.neighbors import NearestNeighbors
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import normalize
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+from collections import Counter
+from random import random
+
+from flask import Flask, render_template, request, jsonify
+from sql_related import mysql_operator
 
 app = Flask(__name__)
+restored_cities_results, restored_reviews_results, distances = mysql_operator.get_data()
 
+restored_scores = mysql_operator.get_score()
 
-cosmos_endpoint = 'https://tutorial-uta-cse6332.documents.azure.com:443/'
-cosmos_key = 'fSDt8pk5P1EH0NlvfiolgZF332ILOkKhMdLY6iMS2yjVqdpWx4XtnVgBoJBCBaHA8PIHnAbFY4N9ACDbMdwaEw=='
-
-
-cosmos_database_id = 'tutorial'
-cosmos_container_id = 'us_cities'
-cosmos_reviews_container_id = 'reviews'
-
-cosmos_client = CosmosClient(cosmos_endpoint, cosmos_key)
-cosmos_database = cosmos_client.get_database_client(cosmos_database_id)
-cosmos_container = cosmos_database.get_container_client(cosmos_container_id)
-cosmos_reviews_container = cosmos_database.get_container_client(cosmos_reviews_container_id)
-
-redis_password = "b9Q42F5LUEahwEb2D6HCbXLzTcIupxtPtAzCaEpdjYE="
-redis_host = "tutorial-uta-cse6332-redis.redis.cache.windows.net"
-redis_port = 6380
-
-
-cache = redis.StrictRedis(
-    host=redis_host,
-    port=redis_port,
-    db=0,
-    password=redis_password,
-    ssl=True,
-)
-
-
-use_cache = False
-
-def toggle_cache_status():
-    global use_cache
-    use_cache = not use_cache
-    return use_cache
-
-@app.route('/toggle_cache', methods=['GET'])
-def toggle_cache():
-    status = toggle_cache_status()
-    return jsonify({'status': status})
-
-@app.route('/stat/closest_cities', methods=['GET'])
-def closest_cities():
-    start_time = time.time()
-
-    city_name = request.args.get('city')
-    page_size = int(request.args.get('page_size', 50))
-    page = int(request.args.get('page', 0))
-
-    if use_cache:
-        cache_key = f"closest_cities_{city_name}_{page_size}_{page}"
-        cached_result = cache.get(cache_key)
-
-        if cached_result:
-            result = json.loads(cached_result)
-            result['cache_hit'] = True
-            result['computation_time'] = 0  # Actual time not needed for cached results
-            return jsonify(result)
-
-    
-    city_query = f"SELECT c.lat, c.lng FROM c WHERE c.city = '{city_name}'"
-    city_coordinates = list(cosmos_container.query_items(query=city_query, enable_cross_partition_query=True))
-
-    if not city_coordinates:
-        return jsonify({'error': 'City not found'}), 404
-
-    city_coordinate = city_coordinates[0]
-    lat, lng = float(city_coordinate['lat']), float(city_coordinate['lng'])
-
-    all_cities_query = f"SELECT c.city, c.lat, c.lng FROM c WHERE c.city != '{city_name}'"
-    all_cities = list(cosmos_container.query_items(query=all_cities_query, enable_cross_partition_query=True))
-
-    sorted_cities = sorted(all_cities, key=lambda c: math.sqrt((lat - float(c['lat']))**2 + (lng - float(c['lng']))**2))
-
-  
-    start_idx = page * page_size
-    end_idx = start_idx + page_size
-    paginated_cities = sorted_cities[start_idx:end_idx]
-
-    end_time = time.time()
-    computation_time = (end_time - start_time) * 1000
-
-    result = {
-        'cities': paginated_cities,
-        'computation_time': computation_time,
-        'cache_hit': False
-    }
-
-    if use_cache:
-        # Store result in Redis cache
-        cache_key = f"closest_cities_{city_name}_{page_size}_{page}"
-        cache.setex(cache_key, 3600, json.dumps(result))  # Cache result for 1 hour
-
-    return jsonify(result)
-
-stopwords_file_path = 'stopwords.txt'
-
-def read_stopwords_from_file(file_path):
-    with open(file_path, 'r') as file:
-        stopwords = [line.strip() for line in file]
-    return set(stopwords)
-
-stopwords_file_path = 'stopwords.txt'
-stopwords = read_stopwords_from_file(stopwords_file_path)
-
-
-stopwords = stopwords.union(ENGLISH_STOP_WORDS)
-
-# Function to perform KNN clustering on reviews
-def knn_reviews_clustering(classes, k_value, words):
-    # Retrieve cities and reviews from Cosmos DB
-    query_cities = "SELECT c.city, c.population, c.lat, c.lng FROM c"
-    cities = list(cosmos_container.query_items(query=query_cities, enable_cross_partition_query=True))
-
-    query_reviews = "SELECT r.city, r.review FROM r"
-    reviews = list(cosmos_reviews_container.query_items(query=query_reviews, enable_cross_partition_query=True))
-
-    # Extract relevant data
-    city_data = [(city['city'], city['population'], (city['lat'], city['lng'])) for city in cities]
-    review_data = [(review['city'], review['review'].lower()) for review in reviews]
-
-    # Prepare TF-IDF matrix
-    vectorizer = TfidfVectorizer(stop_words=stopwords, max_features=words)
-    tfidf_matrix = vectorizer.fit_transform([review[1] for review in review_data])
-    tfidf_matrix_normalized = normalize(tfidf_matrix)
-
-    # Use Nearest Neighbors to find K nearest neighbors for each city
-    nn_model = NearestNeighbors(n_neighbors=k_value)
-    nn_model.fit(tfidf_matrix_normalized)
-    distances, indices = nn_model.kneighbors(tfidf_matrix_normalized)
-
-    # Generate sample result
-    result = {
-        'classes': classes,
-        'k': k_value,
-        'words': words,
-        'clusters': []
-    }
-
-    for cluster_label in range(classes):
-        cluster_indices = [i for i in range(len(indices)) if cluster_label in indices[i]]
-        cluster_reviews = [review_data[i] for i in cluster_indices]
-
-        # Placeholder: Calculate weighted average score
-        weighted_avg_score = sum(city[1] for city in city_data if city[0] in [review[0] for review in cluster_reviews]) / len(cluster_reviews)
-
-        # Placeholder: Extract most popular words
-        popular_words = vectorizer.get_feature_names_out()
-
-        # Placeholder: Extract center city
-        center_city = city_data[cluster_indices[0]][0] if cluster_indices else None
-
-        result['clusters'].append({
-            'center_city': center_city,
-            'cities_in_cluster': [review[0] for review in cluster_reviews],
-            'popular_words': popular_words,
-            'weighted_average_score': weighted_avg_score
-        })
-
-    return result
-
-@app.route('/stat/knn_reviews', methods=['GET'])
-def knn_reviews():
-    start_time = time.time()
-
-    classes = int(request.args.get('classes', 6))
-    k_value = int(request.args.get('k', 3))
-    words = int(request.args.get('words', 100))
-
-    if use_cache:
-        cache_key = f"knn_reviews_{classes}_{k_value}_{words}"
-        cached_result = cache.get(cache_key)
-
-        if cached_result:
-            result = json.loads(cached_result)
-            result['cache_hit'] = True
-            result['computation_time'] = 0  # Actual time not needed for cached results
-            return jsonify(result)
-
-    result = knn_reviews_clustering(classes, k_value, words)
-
-    end_time = time.time()
-    computation_time = (end_time - start_time) * 1000
-
-    result['computation_time'] = computation_time
-    result['cache_hit'] = False
-
-    if use_cache:
-        # Store result in Redis cache
-        cache_key = f"knn_reviews_{classes}_{k_value}_{words}"
-        cache.setex(cache_key, 3600, json.dumps(result))  # Cache result for 1 hour
-
-    return jsonify(result)
-
-@app.route('/flush_cache', methods=['POST'])
-def flush_cache():
-    cache.flushdb()
-    return jsonify({'status': 'Cache flushed successfully'})
 
 @app.route('/')
-def index():
-    return render_template('index.html')
+def mainp():
+    return render_template('mainp.html')
+
+
+@app.route('/q10')
+def index10():
+    return render_template('q10.html')
+
+
+@app.route('/q11')
+def index11():
+    return render_template('q11.html')
+
+
+@app.route('/q12')
+def index12():
+    return render_template('q12.html')
+
+
+@app.route('/update_chart', methods=['POST'])
+def update_chart():
+    start_time = time.time()
+
+    data = request.get_json()
+    city = data.get('city')
+    state = data.get('state')
+
+    j = -1
+    for i in range(0, len(restored_cities_results)):
+        if restored_cities_results[i]['city'] == city and restored_cities_results[i]['state'] == state:
+            j = i
+            break
+
+    if j == -1:
+        return jsonify([])
+    else:
+        distance = distances[j]
+        sorted_indices = sort_indices(distance)
+        new_array = [[restored_cities_results[i]['city'], distances[j][i]] for i in sorted_indices]
+
+        end_time = time.time()
+        run_time = end_time - start_time
+
+        return jsonify({"dis": new_array[1:], "t": run_time})
+
+
+@app.route('/update_chart2', methods=['POST'])
+def update_chart2():
+    start_time = time.time()
+
+    data = request.get_json()
+    city = data.get('city')
+    state = data.get('state')
+
+    j = -1
+    for i in range(0, len(restored_cities_results)):
+        if restored_cities_results[i]['city'] == city and restored_cities_results[i]['state'] == state:
+            j = i
+            break
+
+    if j == -1:
+        return jsonify([])
+    else:
+        distance = distances[j]
+        sorted_indices = sort_indices(distance)
+        new_array = [[restored_cities_results[i]['city'], restored_scores[restored_cities_results[i]['city']]] for i in
+                     sorted_indices]
+
+        end_time = time.time()
+        run_time = end_time - start_time
+
+        return jsonify({"dis": new_array[1:], "t": run_time})
+
+
+cityno_class = []
+class_population = {}
+class_citynumber = {}
+class_reviewscore = {}
+class_centercity = {}
+class_mostpopulation = {}
+class_allreview = {}
+
+
+@app.route('/update_chart3', methods=['POST'])
+def update_chart3():
+    start_time = time.time()
+
+    class_population.clear()
+    class_citynumber.clear()
+    class_reviewscore.clear()
+    class_centercity.clear()
+    class_mostpopulation.clear()
+    class_allreview.clear()
+
+    data = request.get_json()
+    kid = data.get('kid')
+    classid = data.get('classid')
+    global cityno_class
+    cityno_class = mysql_operator.knn_using(restored_cities_results, distances, kid, classid)
+
+    for ls in cityno_class:
+        if ls[1] in class_population:
+            class_population[ls[1]] += int(restored_cities_results[ls[0]]['population'])
+
+            class_citynumber[ls[1]] = class_citynumber[ls[1]] + 1
+            class_reviewscore[ls[1]] += int(restored_reviews_results[ls[0]]['score']) * int(
+                restored_cities_results[ls[0]]['population'])
+            if int(restored_cities_results[ls[0]]['population']) > class_mostpopulation[ls[1]]:
+                class_centercity[ls[1]] = [restored_reviews_results[ls[0]]['city'],
+                                           restored_reviews_results[ls[0]]['state']]
+                class_mostpopulation[ls[1]] = int(restored_cities_results[ls[0]]['population'])
+            class_allreview[ls[1]] = class_allreview[ls[1]] + " " + restored_reviews_results[ls[0]]['review']
+
+        else:
+            # 否则，将类别添加到字典并初始化人口
+            class_population[ls[1]] = int(restored_cities_results[ls[0]]['population'])
+
+            class_citynumber[ls[1]] = 1
+            class_reviewscore[ls[1]] = int(restored_reviews_results[ls[0]]['score']) * int(
+                restored_cities_results[ls[0]]['population'])
+            class_centercity[ls[1]] = [restored_cities_results[ls[0]]['city'], restored_cities_results[ls[0]]['state']]
+            class_mostpopulation[ls[1]] = int(restored_cities_results[ls[0]]['population'])
+            class_allreview[ls[1]] = restored_reviews_results[ls[0]]['review']
+
+    result_array = sorted(class_population.items())
+    end_time = time.time()
+    run_time = end_time - start_time
+
+    return jsonify({"re": result_array, "t": run_time})
+
+
+@app.route('/update_chart4', methods=['POST'])
+def update_chart4():
+
+    data = request.get_json()
+    ind = data.get('ind')
+    ind = "class" + str(ind + 1)
+
+    noc = class_citynumber[ind]
+    was = float(class_reviewscore[ind]) / int(class_population[ind])
+    cn, sn = class_centercity[ind][0], class_centercity[ind][1]
+    labels = ["movie", "great", "time", "bought", "book", "love"]
+
+    word_counts = {}
+    for class_key, review in class_allreview.items():
+        # 使用正则表达式将字符串分割成单词
+        words = re.findall(r'\b\w+\b', review.lower())  # 转换为小写并使用正则表达式提取单词
+        # 使用 Counter 统计每个单词的出现次数
+        word_counts[class_key] = Counter(words)
+
+
+
+    tm = 0
+    tg = 0
+    tt = 0
+    tb = 0
+    tbk = 0
+    tl = 0
+    for class_key, counts in word_counts.items():
+        tm = tm + counts['movie']
+        tg = tg + counts['great']
+        tt = tt + counts['time']
+        tb = tb + counts['bought']
+        tbk = tbk + counts['book']
+        tl = tl + counts['love']
+
+    rad=[]
+    rad.append(word_counts[ind]["movie"]/0.75/tm)
+    rad.append(word_counts[ind]["great"] / 0.75 / tg)
+    rad.append(word_counts[ind]["time"] / 0.75 / tt)
+    rad.append(word_counts[ind]["bought"] / 0.75 / tb)
+    rad.append(word_counts[ind]["book"] / 0.75 / tbk)
+    rad.append(word_counts[ind]["love"] / 0.75 / tl)
+
+    max = 0
+    maxlabel = ''
+    t=[tm,tg,tt,tb,tbk,tl]
+    for i in range(0,len(labels)):
+        if word_counts[ind][labels[i]]/0.75/t[i] > max:
+            max = word_counts[ind][labels[i]]/0.75/t[i]
+            maxlabel = labels[i]
+
+    return jsonify({"noc": noc, "was": was, "cn": cn, "sn": sn, "sw":maxlabel,"labels": labels,"rad":rad})
+
+
+def sort_indices(arr):
+    return sorted(range(len(arr)), key=lambda k: arr[k])
+
 
 if __name__ == '__main__':
     app.run(debug=True)
