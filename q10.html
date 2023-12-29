@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="{{ url_for('static', filename='chart.js') }}"></script>
+    <title>Chart.js Bar Chart with Pagination</title>
+    <style>
+        #chart-container {
+            width: 80%;
+            margin: auto;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="input-container">
+    <label for="cityInput">City:</label>
+    <input type="text" id="cityInput">
+
+    <label for="stateInput">State:</label>
+    <input type="text" id="stateInput">
+
+    <button onclick="updateChartData()">Update Chart</button>
+</div>
+
+<div id="chart-container">
+    <canvas id="myChart"></canvas>
+    <div id="pagination-container">
+        <button onclick="changePage(-1)">Previous</button>
+        <label for="dataSelector">Page:</label>
+        <span id="currentPage">1</span>
+        <span>/</span>
+        <span id="totalPages">1</span>
+        <button onclick="changePage(1)">Next</button>
+    </div>
+</div>
+
+<div id="query-time">Query time: <span id="query-time-value"></span>s</div>
+
+<style>
+    #chart-container {
+        width: 80%;
+        margin: auto;
+        padding: 20px;
+    }
+
+    #input-container {
+        text-align: center;
+        margin-bottom: 20px; /* Add margin at the bottom for spacing */
+    }
+
+    #input-container label, #input-container input, #input-container button {
+        margin: 5px;
+    }
+
+    #pagination-container {
+        text-align: center;
+    }
+</style>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        var queryTimeElement = document.getElementById('query-time-value');
+        queryTimeElement.textContent = "  ";
+        var inputData = [];
+        var itemsPerPage = 50;
+        var numPages = Math.ceil(inputData.length / itemsPerPage);
+        var currentPage = 1;
+
+        var currentPageElement = document.getElementById('currentPage');
+        var totalPagesElement = document.getElementById('totalPages');
+        var dataSelector = document.getElementById('dataSelector');
+
+        totalPagesElement.textContent = numPages;
+
+        updatePagination();
+
+        // Initialize the chart with the first 50 data points
+        createChart(inputData.slice(0, itemsPerPage));
+
+        window.changePage = function (delta) {
+            currentPage += delta;
+            if (currentPage < 1) {
+                currentPage = 1;
+            } else if (currentPage > numPages) {
+                currentPage = numPages;
+            }
+
+            updatePagination();
+            updateChart(inputData, currentPage, itemsPerPage);
+        };
+
+        function updatePagination() {
+            currentPageElement.textContent = currentPage;
+        }
+    });
+
+    function updateChart(inputData, currentPage, itemsPerPage) {
+        var startIndex = (currentPage - 1) * itemsPerPage;
+        var endIndex = currentPage * itemsPerPage;
+        var selectedData = inputData.slice(startIndex, endIndex);
+
+        // Clear the existing chart
+        if (window.myChart) {
+            window.myChart.destroy();
+        }
+
+        // Create and update the chart with the new data
+        createChart(selectedData);
+    }
+
+    function createChart(data) {
+        var ctx = document.getElementById('myChart').getContext('2d');
+        window.myChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: data.map(function (item) {
+                    return item[0];
+                }),
+                datasets: [{
+                    label: 'City Distance',
+                    data: data.map(function (item) {
+                        return item[1];
+                    }),
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                scales: {
+                    y: {
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    }
+
+    function updateChartData() {
+        window.myChart.destroy();
+        var city = document.getElementById('cityInput').value;
+        var state = document.getElementById('stateInput').value;
+
+        var data = {
+            city: city,
+            state: state
+        };
+
+        fetch('/update_chart', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        })
+            .then(response => response.json())
+            .then(result => {
+                // 在这里处理从Flask返回的结果，更新图表等
+
+                var queryTimeElement = document.getElementById('query-time-value');
+                queryTimeElement.textContent = result.t;
+                result = result.dis;
+                console.log(result);
+                var inputData = result;
+                var itemsPerPage = 50;
+                var numPages = Math.ceil(inputData.length / itemsPerPage);
+                var currentPage = 1;
+
+                var currentPageElement = document.getElementById('currentPage');
+                var totalPagesElement = document.getElementById('totalPages');
+                var dataSelector = document.getElementById('dataSelector');
+
+                totalPagesElement.textContent = numPages;
+
+                updatePagination();
+
+                // Initialize the chart with the first 50 data points
+                createChart(result.slice(0, itemsPerPage));
+
+                window.changePage = function (delta) {
+                    currentPage += delta;
+                    if (currentPage < 1) {
+                        currentPage = 1;
+                    } else if (currentPage > numPages) {
+                        currentPage = numPages;
+                    }
+
+                    updatePagination();
+                    updateChart(inputData, currentPage, itemsPerPage);
+                };
+
+                function updatePagination() {
+                    currentPageElement.textContent = currentPage;
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+    }
+
+
+</script>
+
+</body>
+</html>
